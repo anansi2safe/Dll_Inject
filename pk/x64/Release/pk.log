@@ -1,0 +1,8 @@
+﻿  inject.cpp
+d:\cp\pk\pk\inject.cpp(129): warning C4267: “初始化”: 从“size_t”转换到“DWORD”，可能丢失数据
+  正在生成代码
+  9 of 9 functions (100.0%) were compiled.
+    8 functions were new in current compilation
+    0 functions had inline decision re-evaluated but remain unchanged
+  已完成代码的生成
+  pk.vcxproj -> D:\cp\pk\x64\Release\inject.exe
