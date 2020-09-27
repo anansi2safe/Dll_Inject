@@ -1,20 +1,20 @@
-// FileName : KernelFuncInject.cpp
-// Creator : PeterZheng
-// Date : 2019/01/10 21:32
-// Comment : Use Kernel Function To Inject
-//
-////////////////////////////////
+/************************************************************
+*                     Author:Pluviophile                    *
+*                    Date:2020/9/27-23:03                   *
+*     E-Mail:1565203609@qq.com/pluviophile12138@outlook.com *
+*         远线程注入，将DllPath指定的dll注入指定的进程      *
+*************************************************************/
 
 #pragma once
-#include <cstdio>
-#include <cstdlib>
-#include <iostream>
-#include <strsafe.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 #include <Windows.h>
 #include <TlHelp32.h>
 
+/*判断系统架构，并定义ZwCreateThreadEx函数指针*/
 #ifdef _WIN64
-typedef DWORD(WINAPI* typedef_ZwCreateThreadEx)(
+typedef	DWORD(WINAPI* pZwCreateThreadEx)(
 	PHANDLE ThreadHandle,
 	ACCESS_MASK DesiredAccess,
 	LPVOID ObjectAttributes,
@@ -25,7 +25,8 @@ typedef DWORD(WINAPI* typedef_ZwCreateThreadEx)(
 	SIZE_T ZeroBits,
 	SIZE_T StackSize,
 	SIZE_T MaximumStackSize,
-	LPVOID pUnkown);
+	LPVOID pUnkown
+	);
 #else
 typedef DWORD(WINAPI* typedef_ZwCreateThreadEx)(
 	PHANDLE ThreadHandle,
@@ -38,154 +39,188 @@ typedef DWORD(WINAPI* typedef_ZwCreateThreadEx)(
 	DWORD dwStackSize,
 	DWORD dw1,
 	DWORD dw2,
-	LPVOID pUnkown);
+	LPVOID pUnkown
+	);
 #endif
 
-using namespace std;
-
-// 提权函数
-BOOL EnableDebugPriv(LPCSTR name)
+/*
+设定本进程的程序调试权限
+lPcstr:权限字符串
+backCode:错误返回码
+*/
+BOOL GetDebugPrivilege(
+_In_ LPCSTR lPcstr,
+_Inout_ DWORD* backCode
+)
 {
-	HANDLE hToken;
-	LUID luid;
-	TOKEN_PRIVILEGES tp;
-	// 打开进程令牌
-	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken))
-	{
-		printf("[!]Get Process Token Error!\n");
-		return false;
-	}
-	// 获取权限Luid
-	if (!LookupPrivilegeValue(NULL, name, &luid))
-	{
-		printf("[!]Get Privilege Error!\n");
-		return false;
-	}
-	tp.PrivilegeCount = 1;
-	tp.Privileges[0].Luid = luid;
-	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-	// 修改进程权限
-	if (!AdjustTokenPrivileges(hToken, false, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL))
-	{
-		printf("[!]Adjust Privilege Error!\n");
-		return false;
-	}
-	return true;
-}
+	HANDLE Token = NULL;
+	LUID luid = { 0 };
+	TOKEN_PRIVILEGES Token_privileges = { 0 };
+	//内存初始化为zero
+	memset(&luid, 0x00, sizeof(luid));
+	memset(&Token_privileges, 0x00, sizeof(Token_privileges));
 
-// 根据进程名字获取进程Id
-BOOL GetProcessIdByName(CHAR* szProcessName, DWORD& dwPid)
-{
-	HANDLE hSnapProcess = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if (hSnapProcess == NULL)
+	//打开进程令牌
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &Token))
 	{
-		printf("[*] Create Process Snap Error!\n");
+		*backCode = 0x01;
 		return FALSE;
 	}
-	PROCESSENTRY32 pe32 = { 0 };
-	::RtlZeroMemory(&pe32, sizeof(pe32));
-	pe32.dwSize = sizeof(pe32);
-	BOOL bRet = ::Process32First(hSnapProcess, &pe32);
-	while (bRet)
+
+	//获取特权luid
+	if (!LookupPrivilegeValue(NULL,lPcstr,&luid))
 	{
-		if (_stricmp(pe32.szExeFile, szProcessName) == 0)
-		{
-			dwPid = pe32.th32ProcessID;
-			return TRUE;
-		}
-		bRet = ::Process32Next(hSnapProcess, &pe32);
+		*backCode = 0x02;
+		return FALSE;
 	}
-	return FALSE;
+
+	//设定结构体luid与特权
+	Token_privileges.PrivilegeCount = 1;
+	Token_privileges.Privileges[0].Luid = luid;
+	Token_privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	//修改进程特权
+	if (!AdjustTokenPrivileges(Token, FALSE, &Token_privileges, sizeof(TOKEN_PRIVILEGES), NULL, NULL))
+	{
+		*backCode = 0x03;
+		return FALSE;
+	}
+	*backCode = 0x00;
+	return TRUE;
 }
 
-int main(int argc, char* argv[])
+/*
+根据进程名获取进程pid，执行无误返回进程pid，出错返回-1
+ProcessName:进程名
+backCode:错误返回码
+*/
+int GetProcessPid(
+	_In_ const char* ProcessName,
+	_Inout_ DWORD* backCode
+)
 {
-	if (argc != 3)
+	PROCESSENTRY32 P32 = { 0 };
+	HANDLE H32 = NULL;
+	//内存初始化为zeor
+	memset(&P32, 0X00, sizeof(P32));
+	//创建快照
+	H32 = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	P32.dwSize = sizeof(P32);
+	if (H32 == NULL)
 	{
-		printf("[*] Format Error!  \nYou Should FOLLOW THIS FORMAT: <APCInject EXENAME DLLNAME> \n");
-		return 0;
+		*backCode = 0x01;
+		return -1;
 	}
-	LPSTR szExeName = (LPSTR)::VirtualAlloc(NULL, 100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	LPSTR szDllPath = (LPSTR)::VirtualAlloc(NULL, 100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	::RtlZeroMemory(szExeName, 100);
-	::RtlZeroMemory(szDllPath, 100);
-	::StringCchCopy(szExeName, 100, argv[1]);
-	::StringCchCopy(szDllPath, 100, argv[2]);
-	DWORD dwPid = 0;
-	// 系统进程必须先提权才能打开，否则在OpenProcess步骤会失败
-	EnableDebugPriv(SE_DEBUG_NAME);
-	BOOL bRet = GetProcessIdByName(szExeName, dwPid);
-	if (!bRet)
+	//开始循环遍历进程
+	BOOL ret = Process32First(H32, &P32);
+	while (ret)
 	{
-		printf("[*] Get Process Id Error!\n");
-		return 0;
+		//发现指定进程存在
+		if (!strcmp(P32.szExeFile, ProcessName))
+		{
+			*backCode = 0x00;
+			return P32.th32ProcessID;
+		}
+		ret = Process32Next(H32, &P32);
 	}
-	HANDLE hProcess = ::OpenProcess(PROCESS_ALL_ACCESS, FALSE, dwPid);
-	if (hProcess == NULL)
-	{
-		printf("[*] Open Process Error!\n");
-		return 0;
-	}
-	DWORD dwDllPathLen = strlen(szDllPath) + 1;
-	LPVOID lpBaseAddress = ::VirtualAllocEx(hProcess, NULL, dwDllPathLen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	if (lpBaseAddress == NULL)
-	{
-		printf("[*] VirtualAllocEx Error!\n");
-		return 0;
-	}
-	SIZE_T dwWriten = 0;
-	// 把DLL路径字符串写入目标进程
-	::WriteProcessMemory(hProcess, lpBaseAddress, szDllPath, dwDllPathLen, &dwWriten);
-	if (dwWriten != dwDllPathLen)
-	{
-		printf("[*] Write Process Memory Error!\n");
-		return 0;
-	}
-	// 获取LoadLibrary函数地址
-	LPVOID pLoadLibraryFunc = ::GetProcAddress(::GetModuleHandle("kernel32.dll"), "LoadLibraryA");
-	if (pLoadLibraryFunc == NULL)
-	{
-		printf("[*] Get Func Address Error!\n");
-		return 0;
-	}
-	HMODULE hNtdll = ::LoadLibrary("ntdll.dll");
-	if (hNtdll == NULL)
-	{
-		printf("[*] Load NtDLL Error!\n");
-		return 0;
-	}
-	typedef_ZwCreateThreadEx ZwCreateThreadEx = (typedef_ZwCreateThreadEx)::GetProcAddress(hNtdll, "ZwCreateThreadEx");
-	if (ZwCreateThreadEx == NULL)
-	{
-		printf("[*] Get NTDLL Func Address Error!\n");
-		return 0;
-	}
+	*backCode = 0x01;
+	return -1;
+}
+
+/*
+主函数
+*/
+int main(int argv, char* argc[])
+{
+	//对必要的变量进行声明以及初始化
+	DWORD backCode = 0;
+	HANDLE hProcess = NULL;
+	LPVOID Buff = NULL;
+	LPVOID LoadLibraryBase = NULL;
+	char DllPath[] = "D:\\cp\\pk\\x64\\Release\\pk.dll";
+	DWORD DllPathLen = strlen(DllPath) + 1;
+	HMODULE Ntdll = NULL;
+	SIZE_T write_len = 0;
 	DWORD dwStatus = 0;
 	HANDLE hRemoteThread = NULL;
-	dwStatus = ZwCreateThreadEx(&hRemoteThread, PROCESS_ALL_ACCESS, NULL, hProcess, (LPTHREAD_START_ROUTINE)pLoadLibraryFunc, lpBaseAddress, 0, 0, 0, 0, NULL);
-	if (hRemoteThread == NULL)
+
+	//通过进程名获取pid
+	int pid = GetProcessPid("notepad.exe", &backCode);
+	if (pid == -1)
 	{
-		printf("[*] Create Remote Thread Error!\n");
+		puts("pid get error");
 		return 0;
 	}
 
-	// DLL路径分割，方便输出
-	LPCSTR szPathSign = "\\";
-	LPSTR p = NULL;
-	LPSTR next_token = NULL;
-	p = strtok_s(szDllPath, szPathSign, &next_token);
-	while (p)
+	//提升进程特权，获得调试权限
+	if (!GetDebugPrivilege(SE_DEBUG_NAME, &backCode))
 	{
-		StringCchCopy(szDllPath, 100, p);
-		p = strtok_s(NULL, szPathSign, &next_token);
+		puts("DBG privilege error");
+		printf(" %d", backCode);
+		return 0;
 	}
-	printf("[*] High Privilege Inject Info [%s ==> %s] Success\n", szDllPath, szExeName);
 
-	::CloseHandle(hProcess);
-	::FreeLibrary(hNtdll);
-	::VirtualFree(szExeName, 0, MEM_RELEASE);
-	::VirtualFree(szDllPath, 0, MEM_RELEASE);
-	::ExitProcess(0);
+	//打开要被注入的进程
+	if ((hProcess=OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid))== NULL)
+	{
+		puts("process open erro");
+		return 0;
+	}
+
+	//在要被注入的进程中创建内存，用于存放注入dll的路径
+	Buff = VirtualAllocEx(hProcess, NULL, DllPathLen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (Buff==NULL)
+	{
+		puts("Buff alloc error");
+		return 0;
+	}
+
+	//将dll路径写入刚刚创建的内存中
+	WriteProcessMemory(hProcess, Buff, DllPath, DllPathLen, &write_len);
+	if(DllPathLen != write_len)
+	{
+		puts("write error");
+		return 0;
+	}
+
+	//从kernel32.dll中获取LoadLibrary函数
+	LoadLibraryBase = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
+	if (LoadLibraryBase == NULL)
+	{
+		puts("kernel32 get error");
+		return 0;
+	}
+
+	//加载ntdll.dll并从中获取内核函数ZwCreateThread，并使用函数指针指向此函数
+	Ntdll = LoadLibrary("ntdll.dll");
+	pZwCreateThreadEx ZwCreateThreadEx = 
+		(pZwCreateThreadEx)GetProcAddress(Ntdll, "ZwCreateThreadEx");
+	if (ZwCreateThreadEx == NULL)
+	{
+		puts("func get error");
+		return 0;
+	}
+
+	//执行ZwCreateThread函数，在指定进程中创建线程加载要被注入的dll
+	dwStatus = ZwCreateThreadEx(
+		&hRemoteThread,
+		PROCESS_ALL_ACCESS,
+		NULL,
+		hProcess,
+		(LPTHREAD_START_ROUTINE)LoadLibraryBase,
+		Buff,
+		0, 0, 0, 0,
+		NULL
+	);
+	if (hRemoteThread == NULL)
+	{
+		puts("zwcreatethread fun error");
+		return 0;
+	}
+
+	//释放不需要的变量以及内存
+	CloseHandle(hProcess);
+	FreeModule(Ntdll);
+	ExitProcess(0);
 	return 0;
-
 }
